@@ -93,7 +93,7 @@ func execute() error {
 
 		lastJob := e.Detail.Attempts[len(e.Detail.Attempts)-1]
 		jobURL := fmt.Sprintf("https://%[1]s.console.aws.amazon.com"+
-			"/batch/home?region=%[1]s#/jobs/queue/arn:aws:batch:%[1]s:%[2]s:job-queue~2F:%[3]s/job/%[4]s?state=FAILED",
+			"/batch/home?region=%[1]s#/jobs/queue/arn:aws:batch:%[1]s:%[2]s:job-queue~2F%[3]s/job/%[4]s?state=FAILED",
 			e.Region, e.Account, queueName, e.Detail.JobID)
 
 		failedJob := notifyFailedJob{
