@@ -4,140 +4,102 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/gobwas/glob"
-	"github.com/pkg/errors"
-	"github.com/urfave/cli"
 	"github.com/yuichiro-h/awsbatch-failed-job-notifier/config"
 	"github.com/yuichiro-h/awsbatch-failed-job-notifier/log"
+	"github.com/yuichiro-h/go/aws/sqsrouter"
 	"go.uber.org/zap"
 )
 
 func main() {
-	app := cli.NewApp()
-	app.Name = "awsbatch-failed-job-notifier"
-	app.Flags = []cli.Flag{
-		cli.StringFlag{
-			Name: "config",
-		},
+	if err := config.Load(os.Getenv("CONFIG_PATH")); err != nil {
+		panic(err)
+		return
 	}
-	app.Before = func(ctx *cli.Context) error {
-		configFilename := ctx.String("config")
-		if err := config.Load(configFilename); err != nil {
-			return err
-		}
+	log.SetConfig(log.Config{
+		Debug: config.Get().Debug,
+	})
 
-		return nil
-	}
-	app.Action = func(ctx *cli.Context) error {
-		if err := execute(); err != nil {
-			log.Get().Error("error occurred", zap.String("cause", fmt.Sprintf("%+v", err)))
-		}
-		return nil
-	}
-	app.Run(os.Args)
-}
-
-func execute() error {
 	region := aws.NewConfig().WithRegion(config.Get().AWS.Region)
 	sess, err := session.NewSession(region)
 	if err != nil {
-		return errors.WithStack(err)
+		log.Get().Error(err.Error())
+		return
 	}
-	sqsCli := sqs.New(sess)
+	r := sqsrouter.New(sess, sqsrouter.WithLogger(log.Get()))
+	r.AddHandler(config.Get().AWS.EventSqsURL, execute)
+	r.Start()
 
-	var events []event
-	var sqsReceiptHandles []*string
-	for {
-		receiveMessageOut, err := sqsCli.ReceiveMessage(&sqs.ReceiveMessageInput{
-			MaxNumberOfMessages: aws.Int64(10),
-			QueueUrl:            aws.String(config.Get().AWS.EventSqsURL),
-		})
-		if err != nil {
-			return errors.WithStack(err)
-		}
-		if len(receiveMessageOut.Messages) == 0 {
-			log.Get().Debug("not found messages", zap.String("queue_url", config.Get().AWS.EventSqsURL))
-			break
-		}
+	ch := make(chan os.Signal)
+	signal.Notify(ch, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	<-ch
 
-		for _, msg := range receiveMessageOut.Messages {
-			var e event
-			if err := json.Unmarshal([]byte(*msg.Body), &e); err != nil {
-				return errors.WithStack(err)
-			}
-			events = append(events, e)
+	r.Stop()
+}
 
-			sqsReceiptHandles = append(sqsReceiptHandles, msg.ReceiptHandle)
-		}
+func execute(ctx *sqsrouter.Context) {
+	var e event
+	if err := json.Unmarshal([]byte(*ctx.Message.Body), &e); err != nil {
+		log.Get().Error(err.Error())
+		return
 	}
-	log.Get().Info("found events", zap.Int("count", len(events)))
 
 	var notifyInputs []notifyInput
-	for _, e := range events {
-		queueName := strings.Split(e.Detail.JobQueue, "/")[1]
+	queueName := strings.Split(e.Detail.JobQueue, "/")[1]
 
-		channel := config.Get().Slack.DefaultChannel
-		for _, q := range config.Get().AWS.JobQueue {
-			if q.SlackChannel != nil && glob.MustCompile(q.Name).Match(queueName) {
-				channel = q.SlackChannel
-			}
+	channel := config.Get().Slack.DefaultChannel
+	for _, q := range config.Get().AWS.JobQueue {
+		if q.SlackChannel != nil && glob.MustCompile(q.Name).Match(queueName) {
+			channel = q.SlackChannel
 		}
-		if channel == nil {
-			continue
-		}
+	}
+	if channel == nil {
+		log.Get().Info("not match channel", zap.String("message", *ctx.Message.Body))
+		return
+	}
 
-		lastJob := e.Detail.Attempts[len(e.Detail.Attempts)-1]
-		jobURL := fmt.Sprintf("https://%[1]s.console.aws.amazon.com"+
-			"/batch/home?region=%[1]s#/jobs/queue/arn:aws:batch:%[1]s:%[2]s:job-queue~2F%[3]s/job/%[4]s?state=FAILED",
-			e.Region, e.Account, queueName, e.Detail.JobID)
+	lastJob := e.Detail.Attempts[len(e.Detail.Attempts)-1]
+	jobURL := fmt.Sprintf("https://%[1]s.console.aws.amazon.com"+
+		"/batch/home?region=%[1]s#/jobs/queue/arn:aws:batch:%[1]s:%[2]s:job-queue~2F%[3]s/job/%[4]s?state=FAILED",
+		e.Region, e.Account, queueName, e.Detail.JobID)
 
-		failedJob := notifyFailedJob{
-			QueueName: queueName,
-			JobName:   e.Detail.JobName,
-			JobURL:    jobURL,
-			Reason:    lastJob.StatusReason,
-			ExitCode:  lastJob.Container.ExitCode,
-		}
+	failedJob := notifyFailedJob{
+		QueueName: queueName,
+		JobName:   e.Detail.JobName,
+		JobURL:    jobURL,
+		Reason:    lastJob.StatusReason,
+		ExitCode:  lastJob.Container.ExitCode,
+	}
 
-		newChannel := true
-		for i, n := range notifyInputs {
-			if n.Channel == *channel {
-				notifyInputs[i].FailedJobs = append(notifyInputs[i].FailedJobs, failedJob)
-				newChannel = false
-				break
-			}
+	newChannel := true
+	for i, n := range notifyInputs {
+		if n.Channel == *channel {
+			notifyInputs[i].FailedJobs = append(notifyInputs[i].FailedJobs, failedJob)
+			newChannel = false
+			break
 		}
-		if newChannel {
-			notifyInputs = append(notifyInputs, notifyInput{
-				Channel:    *channel,
-				FailedJobs: []notifyFailedJob{failedJob},
-			})
-		}
+	}
+	if newChannel {
+		notifyInputs = append(notifyInputs, notifyInput{
+			Channel:    *channel,
+			FailedJobs: []notifyFailedJob{failedJob},
+		})
 	}
 
 	for _, n := range notifyInputs {
 		if err := notify(&n); err != nil {
-			return errors.WithStack(err)
-		}
-	}
-
-	for _, h := range sqsReceiptHandles {
-		_, err = sqsCli.DeleteMessage(&sqs.DeleteMessageInput{
-			QueueUrl:      aws.String(config.Get().AWS.EventSqsURL),
-			ReceiptHandle: h,
-		})
-		if err != nil {
 			log.Get().Error(err.Error())
-			continue
+			return
 		}
 	}
 
-	return nil
+	ctx.SetDeleteOnFinish(true)
 }
 
 type event struct {

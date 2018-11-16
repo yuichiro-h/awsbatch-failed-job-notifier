@@ -2,7 +2,7 @@ BINARY_NAME=awsbatch-failed-job-notifier
 
 all: build
 run:
-	go run *.go --config config.dev.yml
+	CONFIG_PATH=config.dev.yml go run *.go
 build:
 	go build -o bin/$(BINARY_NAME) -v
 test:

@@ -46,8 +46,8 @@ github.com/jmespath/go-jmespath
 github.com/nlopes/slack
 # github.com/pkg/errors v0.8.0
 github.com/pkg/errors
-# github.com/urfave/cli v1.20.0
-github.com/urfave/cli
+# github.com/yuichiro-h/go v0.0.0-20180903062432-bffc704a83e0
+github.com/yuichiro-h/go/aws/sqsrouter
 # go.uber.org/atomic v1.3.2
 go.uber.org/atomic
 # go.uber.org/multierr v1.1.0
