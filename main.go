@@ -60,7 +60,13 @@ func execute(ctx *sqsrouter.Context) {
 		}
 	}
 	if channel == nil {
+		ctx.SetDeleteOnFinish(true)
 		log.Get().Info("not match channel", zap.String("message", *ctx.Message.Body))
+		return
+	}
+	if len(e.Detail.Attempts) == 0 {
+		ctx.SetDeleteOnFinish(true)
+		log.Get().Info("not found event detail", zap.String("message", *ctx.Message.Body))
 		return
 	}
 
