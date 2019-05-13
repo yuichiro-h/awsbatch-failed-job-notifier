@@ -10,24 +10,40 @@ import (
 var c Config
 
 type Config struct {
-	Debug bool
+	Debug       bool        `yaml:"debug"`
+	Region      string      `yaml:"region"`
+	EventSqsURL string      `yaml:"event_sqs_url"`
+	Slack       SlackConfig `yaml:"slack"`
+	JobQueues   []struct {
+		Name  string      `yaml:"name"`
+		Slack SlackConfig `yaml:"slack"`
+	} `yaml:"job_queues"`
+}
 
-	Slack struct {
-		APIToken        string  `yaml:"api_token"`
-		Username        string  `yaml:"username"`
-		IconURL         string  `yaml:"icon_url"`
-		AttachmentColor string  `yaml:"attachment_color"`
-		DefaultChannel  *string `yaml:"default_channel"`
-	} `yaml:"slack"`
+type SlackConfig struct {
+	ApiToken        string `yaml:"api_token"`
+	Username        string `yaml:"username"`
+	Channel         string `yaml:"channel"`
+	AttachmentColor string `yaml:"attachment_color"`
+	IconURL         string `yaml:"icon_url"`
+}
 
-	AWS struct {
-		Region      string `yaml:"region"`
-		EventSqsURL string `yaml:"event_sqs_url"`
-		JobQueue    []struct {
-			Name         string  `yaml:"name"`
-			SlackChannel *string `yaml:"slack_channel"`
-		} `yaml:"job_queue"`
-	} `yaml:"aws"`
+func (c *SlackConfig) Merge(sc SlackConfig) {
+	if sc.ApiToken != "" {
+		c.ApiToken = sc.ApiToken
+	}
+	if sc.AttachmentColor != "" {
+		c.AttachmentColor = sc.AttachmentColor
+	}
+	if sc.Channel != "" {
+		c.Channel = sc.Channel
+	}
+	if sc.IconURL != "" {
+		c.IconURL = sc.IconURL
+	}
+	if sc.Username != "" {
+		c.Username = sc.Username
+	}
 }
 
 func Load(filename string) error {

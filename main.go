@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/gobwas/glob"
+	"github.com/nlopes/slack"
 	"github.com/yuichiro-h/awsbatch-failed-job-notifier/config"
 	"github.com/yuichiro-h/awsbatch-failed-job-notifier/log"
 	"github.com/yuichiro-h/go/aws/sqsrouter"
@@ -26,14 +27,14 @@ func main() {
 		Debug: config.Get().Debug,
 	})
 
-	region := aws.NewConfig().WithRegion(config.Get().AWS.Region)
+	region := aws.NewConfig().WithRegion(config.Get().Region)
 	sess, err := session.NewSession(region)
 	if err != nil {
 		log.Get().Error(err.Error())
 		return
 	}
 	r := sqsrouter.New(sess, sqsrouter.WithLogger(log.Get()))
-	r.AddHandler(config.Get().AWS.EventSqsURL, execute)
+	r.AddHandler(config.Get().EventSqsURL, execute)
 	r.Start()
 
 	ch := make(chan os.Signal)
@@ -50,19 +51,14 @@ func execute(ctx *sqsrouter.Context) {
 		return
 	}
 
-	var notifyInputs []notifyInput
 	queueName := strings.Split(e.Detail.JobQueue, "/")[1]
 
-	channel := config.Get().Slack.DefaultChannel
-	for _, q := range config.Get().AWS.JobQueue {
-		if q.SlackChannel != nil && glob.MustCompile(q.Name).Match(queueName) {
-			channel = q.SlackChannel
+	slackConfig := config.Get().Slack
+	for _, q := range config.Get().JobQueues {
+		if glob.MustCompile(q.Name).Match(queueName) {
+			slackConfig.Merge(q.Slack)
+			break
 		}
-	}
-	if channel == nil {
-		ctx.SetDeleteOnFinish(true)
-		log.Get().Info("not match channel", zap.String("message", *ctx.Message.Body))
-		return
 	}
 	if len(e.Detail.Attempts) == 0 {
 		ctx.SetDeleteOnFinish(true)
@@ -75,34 +71,21 @@ func execute(ctx *sqsrouter.Context) {
 		"/batch/home?region=%[1]s#/jobs/queue/arn:aws:batch:%[1]s:%[2]s:job-queue~2F%[3]s/job/%[4]s?state=FAILED",
 		e.Region, e.Account, queueName, e.Detail.JobID)
 
-	failedJob := notifyFailedJob{
-		QueueName: queueName,
-		JobName:   e.Detail.JobName,
-		JobURL:    jobURL,
-		Reason:    lastJob.StatusReason,
-		ExitCode:  lastJob.Container.ExitCode,
-	}
-
-	newChannel := true
-	for i, n := range notifyInputs {
-		if n.Channel == *channel {
-			notifyInputs[i].FailedJobs = append(notifyInputs[i].FailedJobs, failedJob)
-			newChannel = false
-			break
-		}
-	}
-	if newChannel {
-		notifyInputs = append(notifyInputs, notifyInput{
-			Channel:    *channel,
-			FailedJobs: []notifyFailedJob{failedJob},
-		})
-	}
-
-	for _, n := range notifyInputs {
-		if err := notify(&n); err != nil {
-			log.Get().Error(err.Error())
-			return
-		}
+	_, _, err := slack.New(slackConfig.ApiToken).PostMessage(slackConfig.Channel,
+		slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{
+			Username: slackConfig.Username,
+			IconURL:  slackConfig.IconURL,
+		}),
+		slack.MsgOptionAttachments(slack.Attachment{
+			Color:     slackConfig.AttachmentColor,
+			Pretext:   "Found failed jobs",
+			Title:     fmt.Sprintf("%s/%s", queueName, e.Detail.JobName),
+			TitleLink: jobURL,
+			Text:      fmt.Sprintf("%s(%d)", lastJob.StatusReason, lastJob.Container.ExitCode),
+		}))
+	if err != nil {
+		log.Get().Error(err.Error())
+		return
 	}
 
 	ctx.SetDeleteOnFinish(true)
